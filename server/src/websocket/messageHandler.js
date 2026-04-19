@@ -2,6 +2,30 @@ import logger from "../utils/logger.js";
 import User from "../models/User.js";
 import Room from "../models/Room.js";
 
+// DATA-002: Per-room mutex to prevent race conditions on concurrent joins
+const roomJoinLocks = new Map();
+
+function acquireRoomLock(roomId) {
+  if (!roomJoinLocks.has(roomId)) {
+    roomJoinLocks.set(roomId, Promise.resolve());
+  }
+  let release;
+  const prevLock = roomJoinLocks.get(roomId);
+  const newLock = new Promise((resolve) => {
+    release = resolve;
+  });
+  roomJoinLocks.set(roomId, newLock);
+  return prevLock.then(() => release);
+}
+
+// SEC-006: Improved chat message sanitization — strip control chars instead of naive regex
+function sanitizeChatMessage(text) {
+  return text
+    .trim()
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "") // Strip control characters
+    .substring(0, 500); // Enforce length limit
+}
+
 export async function handleMessage(server, client, message, correlationId) {
   const { type } = message;
 
@@ -20,7 +44,6 @@ export async function handleMessage(server, client, message, correlationId) {
   };
 
   const handler = handlers[type];
-
   if (handler) {
     try {
       await handler(server, client, message, correlationId);
@@ -31,7 +54,6 @@ export async function handleMessage(server, client, message, correlationId) {
         error: error.message,
         correlationId,
       });
-
       server.sendError(client.ws, error.message, correlationId);
     }
   } else {
@@ -47,75 +69,89 @@ async function handleJoinRoom(server, client, message, correlationId) {
     throw new Error("Room ID is required");
   }
 
-  const room = await Room.findOne({ roomId, isActive: true });
-  if (!room) {
-    throw new Error("Room not found");
+  // SEC-004: Validate roomId type to prevent NoSQL injection
+  if (typeof roomId !== "string") {
+    throw new Error("Invalid room ID");
   }
 
-  if (room.currentParticipants >= room.maxParticipants) {
-    throw new Error("Room is full");
-  }
+  // DATA-002: Acquire per-room lock to prevent concurrent join race conditions
+  const release = await acquireRoomLock(roomId);
+  try {
+    const room = await Room.findOne({ roomId, isActive: true });
 
-  const user = await User.findById(client.userId);
-  if (!user) {
-    throw new Error("User not found");
-  }
+    if (!room) {
+      throw new Error("Room not found");
+    }
 
-  if (client.roomId && client.roomId !== roomId) {
-    await server.leaveRoom(client);
-  }
+    if (room.currentParticipants >= room.maxParticipants) {
+      throw new Error("Room is full");
+    }
 
-  if (client.roomId === roomId) {
+    const user = await User.findById(client.userId);
+    if (!user) {
+      throw new Error("User not found");
+    }
+
+    // If client is in a different room, leave that room first
+    if (client.roomId && client.roomId !== roomId) {
+      await server.leaveRoom(client);
+    }
+
+    // If already in this room, refresh participant list
+    if (client.roomId === roomId) {
+      client.username = username || user.displayName || user.username;
+
+      const participants = server
+        .getRoomParticipants(roomId)
+        .filter((p) => p.connectionId !== client.connectionId);
+
+      server.send(client.ws, {
+        type: "room-joined",
+        roomId,
+        participants,
+        correlationId,
+      });
+      return;
+    }
+
     client.username = username || user.displayName || user.username;
 
-    const participants = server
-      .getRoomParticipants(roomId)
-      .filter((p) => p.connectionId !== client.connectionId);
+    await server.registerRoomJoin(room, client);
+
+    const participants = server.getRoomParticipants(roomId);
 
     server.send(client.ws, {
       type: "room-joined",
       roomId,
-      participants,
+      participants: participants.filter(
+        (p) => p.connectionId !== client.connectionId
+      ),
       correlationId,
     });
 
-    return;
-  }
+    server.broadcastToRoom(
+      roomId,
+      {
+        type: "user-joined",
+        userId: client.userId,
+        username: client.username,
+        connectionId: client.connectionId,
+      },
+      client.connectionId
+    );
 
-  client.username = username || user.displayName || user.username;
-
-  await server.registerRoomJoin(room, client);
-
-  const participants = server.getRoomParticipants(roomId);
-
-  server.send(client.ws, {
-    type: "room-joined",
-    roomId,
-    participants: participants.filter(
-      (p) => p.connectionId !== client.connectionId
-    ),
-    correlationId,
-  });
-
-  server.broadcastToRoom(
-    roomId,
-    {
-      type: "user-joined",
+    logger.info("User joined room", {
       userId: client.userId,
       username: client.username,
+      roomId,
       connectionId: client.connectionId,
-    },
-    client.connectionId
-  );
-
-  logger.info("User joined room", {
-    userId: client.userId,
-    username: client.username,
-    roomId,
-    connectionId: client.connectionId,
-    participantCount: server.getUniqueRoomUserCount(roomId),
-    correlationId,
-  });
+      participantCount: server.getUniqueRoomUserCount(roomId),
+      correlationId,
+    });
+  } finally {
+    // DATA-002: Always release the lock, even on error
+    release();
+  }
 }
 
 async function handleLeaveRoom(server, client, message, correlationId) {
@@ -332,7 +368,7 @@ async function handleChatMessage(server, client, message, correlationId) {
     throw new Error("Not in a room");
   }
 
-  if (!text || text.trim().length === 0) {
+  if (!text || typeof text !== "string" || text.trim().length === 0) {
     throw new Error("Message text is required");
   }
 
@@ -340,12 +376,9 @@ async function handleChatMessage(server, client, message, correlationId) {
     throw new Error("Message too long (max 500 characters)");
   }
 
-  // Sanitize message to prevent XSS attacks
-  const sanitizedText = text
-    .trim()
-    .replace(/[<>]/g, "") // Remove < and > to prevent HTML tags
-    .replace(/javascript:/gi, "") // Remove javascript: protocol
-    .replace(/on\w+\s*=/gi, ""); // Remove inline event handlers like onclick=
+  // SEC-006: Use improved sanitization — strip control characters instead of
+  // naive regex that can be bypassed with mixed case or whitespace insertion
+  const sanitizedText = sanitizeChatMessage(text);
 
   if (sanitizedText.length === 0) {
     throw new Error("Message contains invalid characters");

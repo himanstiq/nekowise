@@ -1,129 +1,163 @@
+import "dotenv/config";
 import express from "express";
 import { createServer } from "http";
-import dotenv from "dotenv";
 import cors from "cors";
 import helmet from "helmet";
-import compression from "compression";
 import morgan from "morgan";
+import cookieParser from "cookie-parser"; // SEC-001: Required to read httpOnly cookies
+import crypto from "crypto"; // API-001: For request IDs
+
 import connectDatabase from "./config/database.js";
-import healthRouter from "./routes/health.js";
-import authRouter from "./routes/auth.js";
-import roomRouter from "./routes/room.js";
-import sessionRouter from "./routes/session.js";
-import adminRouter from "./routes/admin.js";
-import logger from "./utils/logger.js";
 import validateEnv from "./utils/validateEnv.js";
+import logger from "./utils/logger.js";
 import SignalingServer from "./websocket/server.js";
+
+// Route imports
+import authRoutes from "./routes/auth.js";
+import roomRoutes from "./routes/room.js";
+import adminRoutes from "./routes/admin.js";
+import sessionRoutes from "./routes/session.js";
+import healthRoutes from "./routes/health.js";
+
+// Middleware imports
 import { apiLimiter } from "./middleware/rateLimiter.js";
 
-dotenv.config();
+// DATA-001: Import Room model for startup reset
+import Room from "./models/Room.js";
+
+// Validate environment variables
 validateEnv();
 
+const PORT = process.env.PORT || 5000;
+const clientUrl = process.env.CLIENT_URL;
 const app = express();
 const httpServer = createServer(app);
-const PORT = process.env.PORT || 5000;
 
-// Validate CLIENT_URL
-const clientUrl = process.env.CLIENT_URL;
-if (!clientUrl) {
-  logger.warn(
-    "CLIENT_URL not set in environment variables. CORS will reject all requests."
-  );
+// SEC-008: Fail in production if CLIENT_URL is missing
+if (!clientUrl && process.env.NODE_ENV === "production") {
+  logger.error("CLIENT_URL is required in production");
+  process.exit(1);
 }
 
+// Security middleware
 app.use(helmet());
 app.use(
   cors({
-    origin: clientUrl || "http://localhost:5173", // Default fallback for development
-    credentials: true,
+    origin:
+      clientUrl ||
+      (process.env.NODE_ENV !== "production"
+        ? "http://localhost:5173"
+        : false), // SEC-008: No silent fallback in production
+    credentials: true, // SEC-001: Required for httpOnly cookies
   })
 );
-app.use(compression());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser()); // SEC-001: Parse httpOnly cookies on every request
 
-// Apply rate limiting to all API routes
-app.use("/api", apiLimiter);
+// SEC-005: Enforce explicit body size limits to prevent memory exhaustion DoS
+app.use(express.json({ limit: "1mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
+// Request logging
 if (process.env.NODE_ENV === "development") {
   app.use(morgan("dev"));
 }
 
-app.use("/api", healthRouter);
-app.use("/api/auth", authRouter);
-app.use("/api/rooms", roomRouter);
-app.use("/api/sessions", sessionRouter);
-app.use("/api/admin", adminRouter);
+// API-001: Structured request logging for all environments (audit trail)
+app.use((req, res, next) => {
+  req.requestId = crypto.randomUUID();
+  res.setHeader("X-Request-ID", req.requestId);
 
-if (process.env.NODE_ENV === "development") {
-  app.get("/api/debug/info", (req, res) => {
-    res.json({
-      message: "Server debug information",
-      availableRoutes: [
-        "GET /api/health",
-        "POST /api/auth/register",
-        "POST /api/auth/login",
-        "GET /api/auth/me",
-        "POST /api/rooms",
-        "GET /api/rooms",
-        "GET /api/sessions",
-        "GET /api/admin/stats",
-        "WS /ws",
-      ],
-      nodeVersion: process.version,
-      environment: process.env.NODE_ENV,
-      port: PORT,
+  const start = Date.now();
+  res.on("finish", () => {
+    logger.info("HTTP Request", {
+      requestId: req.requestId,
+      method: req.method,
+      path: req.path,
+      statusCode: res.statusCode,
+      duration: Date.now() - start,
     });
   });
-}
 
-app.use((req, res) => {
-  logger.warn("Route not found", { path: req.path, method: req.method });
-  res.status(404).json({
-    message: "Route not found",
-    path: req.path,
-    method: req.method,
-  });
+  next();
 });
 
+// Rate limiting
+app.use("/api", apiLimiter);
+
+// Routes
+app.use("/api/auth", authRoutes);
+app.use("/api/rooms", roomRoutes);
+app.use("/api/admin", adminRoutes);
+app.use("/api/sessions", sessionRoutes);
+app.use("/api", healthRoutes);
+
+// Global error handler
 app.use((err, req, res, next) => {
-  logger.error(err.message, { stack: err.stack });
+  logger.error("Unhandled error", {
+    error: err.message,
+    stack: err.stack,
+    requestId: req.requestId,
+  });
   res.status(err.status || 500).json({
-    message: err.message || "Internal Server Error",
-    ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
+    message:
+      process.env.NODE_ENV === "production"
+        ? "Internal server error"
+        : err.message,
   });
 });
 
-connectDatabase();
+// Async startup to allow DB connection and room reset before serving
+(async () => {
+  try {
+    await connectDatabase();
 
-const signalingServer = new SignalingServer(httpServer);
+    // DATA-001: Reset stale participant counts on server startup
+    // After a restart, in-memory state is lost but DB may still show active participants
+    const resetResult = await Room.updateMany(
+      { isActive: true },
+      { $set: { currentParticipants: 0 } }
+    );
+    if (resetResult.modifiedCount > 0) {
+      logger.info("DATA-001: Reset active room participant counts on startup", {
+        roomsReset: resetResult.modifiedCount,
+      });
+    }
 
-httpServer.listen(PORT, () => {
-  logger.info(`Server running on port ${PORT}`);
-  logger.info(`WebSocket server running on ws://localhost:${PORT}/ws`);
-  logger.info(`Environment: ${process.env.NODE_ENV}`);
-});
+    const signalingServer = new SignalingServer(httpServer);
 
-// Graceful shutdown handler
-const gracefulShutdown = (signal) => {
-  logger.info(`${signal} received, shutting down gracefully`);
+    httpServer.listen(PORT, () => {
+      logger.info(`Server running on port ${PORT}`);
+      logger.info(`WebSocket server running on path /ws`);
+      logger.info(`Environment: ${process.env.NODE_ENV || "development"}`);
+    });
 
-  // Close WebSocket connections gracefully
-  signalingServer.wss.clients.forEach((ws) => {
-    ws.close(1000, "Server shutting down");
-  });
+    const gracefulShutdown = (signal) => {
+      logger.info(`${signal} received, shutting down gracefully`);
 
-  httpServer.close(() => {
-    logger.info("Server closed");
-    process.exit(0);
-  });
+      // MEM-001: Clean up server intervals
+      signalingServer.destroy();
 
-  // Force close after 10 seconds
-  setTimeout(() => {
-    logger.error("Forcing shutdown after timeout");
+      signalingServer.wss.clients.forEach((ws) => {
+        ws.close(1000, "Server shutting down");
+      });
+
+      httpServer.close(() => {
+        logger.info("Server closed");
+        process.exit(0);
+      });
+
+      setTimeout(() => {
+        logger.error("Forcing shutdown after timeout");
+        process.exit(1);
+      }, 10000);
+    };
+
+    process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+    process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+  } catch (error) {
+    logger.error("Failed to start server", { error: error.message });
     process.exit(1);
-  }, 10000);
-};
+  }
+})();
 
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+export default app;

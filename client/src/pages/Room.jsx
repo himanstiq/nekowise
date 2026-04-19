@@ -20,7 +20,7 @@ import {
   Video as VideoIcon,
   VideoOff,
   MonitorUp,
-  Grid3x3,
+  LayoutGrid as Grid3x3,
   User,
   Users,
   Phone,
@@ -106,6 +106,7 @@ export default function Room() {
 
         peerConnectionManager.initialize(
           signaling,
+          user.id, // RTC-001: Pass local user ID for glare condition handling
           (userId, username, stream) => {
             logger.debug("Received remote stream from", userId, username);
             setRemoteStreams((prev) => {

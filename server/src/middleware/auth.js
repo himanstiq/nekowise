@@ -6,7 +6,10 @@ export const protect = async (req, res, next) => {
   try {
     let token;
 
-    if (
+    // SEC-001: Read token from httpOnly cookie first, fall back to Authorization header
+    if (req.cookies?.token) {
+      token = req.cookies.token;
+    } else if (
       req.headers.authorization &&
       req.headers.authorization.startsWith("Bearer")
     ) {
@@ -18,7 +21,6 @@ export const protect = async (req, res, next) => {
     }
 
     const decoded = verifyToken(token);
-
     const user = await User.findById(decoded.id).select("-password");
 
     if (!user) {

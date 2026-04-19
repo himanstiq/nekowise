@@ -10,14 +10,51 @@ class SignalingServer {
     this.wss = new WebSocketServer({
       server,
       path: "/ws",
+      // SEC-003: Validate WebSocket origin to prevent cross-site WebSocket hijacking
+      verifyClient: (info, callback) => {
+        const origin = info.origin || info.req.headers.origin;
+        const allowedOrigins = (process.env.CLIENT_URL || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+
+        // In development, also allow common localhost origins
+        if (process.env.NODE_ENV !== "production") {
+          allowedOrigins.push(
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:5173"
+          );
+        }
+
+        if (!origin || !allowedOrigins.includes(origin)) {
+          logger.warn("WebSocket connection rejected: invalid origin", {
+            origin,
+          });
+          callback(false, 403, "Forbidden: invalid origin");
+          return;
+        }
+        callback(true);
+      },
+      maxPayload: 64 * 1024, // SEC-003: 64KB max WebSocket message size
     });
 
     this.clients = new Map();
     this.userConnections = new Map();
     this.rooms = new Map();
-    this.messageRateLimits = new Map(); // Track message counts per connection
+    this.messageRateLimits = new Map();
 
     this.setupWebSocketServer();
+
+    // MEM-001: Periodic cleanup of stale connections and orphaned data
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupStaleConnections();
+    }, 60000);
+
+    // ERR-002: Ping interval for dead connection detection
+    this.pingInterval = setInterval(() => {
+      this.pingAllClients();
+    }, 30000);
   }
 
   setupWebSocketServer() {
@@ -25,7 +62,9 @@ class SignalingServer {
       logger.info("New WebSocket connection attempt");
 
       const url = new URL(req.url, `http://${req.headers.host}`);
-      const token = url.searchParams.get("token");
+      // SEC-001: Accept 'ticket' parameter (short-lived token from /auth/ws-ticket)
+      const token =
+        url.searchParams.get("ticket") || url.searchParams.get("token");
 
       if (!token) {
         logger.warn("WebSocket connection rejected: No token provided");
@@ -51,6 +90,12 @@ class SignalingServer {
           this.userConnections.set(client.userId, new Set());
         }
         this.userConnections.get(client.userId).add(connectionId);
+
+        // ERR-002: Mark connection as alive for ping/pong dead-connection detection
+        ws.isAlive = true;
+        ws.on("pong", () => {
+          ws.isAlive = true;
+        });
 
         logger.info("WebSocket authenticated", {
           userId: decoded.id,
@@ -101,8 +146,52 @@ class SignalingServer {
     logger.info("WebSocket signaling server initialized");
   }
 
+  // ERR-002: Ping all clients to detect dead connections (browser crash, network drop)
+  pingAllClients() {
+    this.wss.clients.forEach((ws) => {
+      if (ws.isAlive === false) {
+        logger.warn("Terminating unresponsive WebSocket connection");
+        return ws.terminate();
+      }
+      ws.isAlive = false;
+      ws.ping();
+    });
+  }
+
+  // MEM-001: Clean up stale connections and orphaned map entries
+  cleanupStaleConnections() {
+    let cleaned = 0;
+
+    this.clients.forEach((client, connectionId) => {
+      if (
+        client.ws.readyState === client.ws.CLOSED ||
+        client.ws.readyState === client.ws.CLOSING
+      ) {
+        this.handleDisconnect(client).catch((err) => {
+          logger.error("Cleanup disconnect error", {
+            connectionId,
+            error: err.message,
+          });
+        });
+        cleaned++;
+      }
+    });
+
+    // MEM-001: Clean orphaned rate limit entries
+    this.messageRateLimits.forEach((_, key) => {
+      if (!this.clients.has(key)) {
+        this.messageRateLimits.delete(key);
+      }
+    });
+
+    if (cleaned > 0) {
+      logger.info("Cleaned stale connections", { count: cleaned });
+    }
+  }
+
   handleMessage(client, message) {
-    const correlationId = message.correlationId || this.generateCorrelationId();
+    const correlationId =
+      message.correlationId || this.generateCorrelationId();
 
     // Rate limiting: Max 100 messages per minute per connection
     const now = Date.now();
@@ -155,7 +244,7 @@ class SignalingServer {
 
     this.clients.delete(client.connectionId);
 
-    // Clean up rate limit data
+    // MEM-001: Clean up rate limit data for disconnected clients
     this.messageRateLimits.delete(client.connectionId);
 
     const connections = this.userConnections.get(client.userId);
@@ -173,7 +262,10 @@ class SignalingServer {
     });
   }
 
-  async leaveRoom(client, { notifyClient = false, correlationId = null } = {}) {
+  async leaveRoom(
+    client,
+    { notifyClient = false, correlationId = null } = {}
+  ) {
     if (!client.roomId) return;
 
     const roomId = client.roomId;
@@ -325,7 +417,6 @@ class SignalingServer {
     });
 
     roomDoc.currentParticipants = this.getUniqueRoomUserCount(roomDoc.roomId);
-
     await roomDoc.save();
   }
 
@@ -345,12 +436,13 @@ class SignalingServer {
       .reverse()
       .find((entry) => {
         if (entry.connectionId) {
-          return entry.connectionId === client.connectionId && !entry.leftAt;
+          return (
+            entry.connectionId === client.connectionId && !entry.leftAt
+          );
         }
-
-        // Fix: Ensure both sides are strings for comparison
         return (
-          entry.userId?.toString() === client.userId.toString() && !entry.leftAt
+          entry.userId?.toString() === client.userId.toString() &&
+          !entry.leftAt
         );
       });
 
@@ -372,6 +464,12 @@ class SignalingServer {
     }
 
     await roomDoc.save();
+  }
+
+  // MEM-001: Cleanup method for graceful shutdown
+  destroy() {
+    clearInterval(this.cleanupInterval);
+    clearInterval(this.pingInterval);
   }
 
   generateCorrelationId() {

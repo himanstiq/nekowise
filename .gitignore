@@ -30,3 +30,5 @@ Thumbs.db
 # Testing
 coverage/
 .nyc_output/
+
+code_audit_prompt.md

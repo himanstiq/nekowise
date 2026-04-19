@@ -16,12 +16,11 @@ export const SignalingProvider = ({ children }) => {
   const [currentRoom, setCurrentRoom] = useState(null);
   const [participants, setParticipants] = useState([]);
 
+  // SEC-001: Connect WebSocket when authenticated — no localStorage token needed,
+  // websocket.connect() internally fetches a short-lived ticket via httpOnly cookie
   useEffect(() => {
     if (isAuthenticated && user) {
-      const token = localStorage.getItem("token");
-      if (token) {
-        websocket.connect(token);
-      }
+      websocket.connect();
     } else {
       websocket.disconnect();
     }
@@ -32,12 +31,26 @@ export const SignalingProvider = ({ children }) => {
   }, [isAuthenticated, user]);
 
   useEffect(() => {
-    const unsubscribe = websocket.onConnectionStateChange((state) => {
+    // ERR-001: Listen for connection state changes including reconnection metadata
+    const unsubscribe = websocket.onConnectionStateChange((state, meta) => {
       setConnectionState(state);
+
+      // ERR-001: Re-join room after WebSocket reconnection to restore signaling
+      if (state === "connected" && meta?.reconnected && currentRoom) {
+        console.log(
+          "ERR-001: Reconnected — re-joining room:",
+          currentRoom
+        );
+        websocket.send({
+          type: "join-room",
+          roomId: currentRoom,
+          username: user?.displayName || user?.username,
+        });
+      }
     });
 
     return unsubscribe;
-  }, []);
+  }, [currentRoom, user]);
 
   useEffect(() => {
     const unsubscribeRoomJoined = websocket.on("room-joined", (message) => {

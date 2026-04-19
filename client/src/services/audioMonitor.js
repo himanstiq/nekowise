@@ -2,66 +2,58 @@ class AudioMonitor {
   constructor() {
     this.audioContexts = new Map();
     this.analysers = new Map();
-    this.volumeCallbacks = new Map();
     this.animationFrames = new Map();
+    this.volumeCallbacks = new Map();
   }
 
   startMonitoring(userId, stream, onVolumeChange) {
-    if (this.audioContexts.has(userId)) {
-      console.log("Already monitoring", userId);
-      return;
-    }
+    // Stop existing monitoring for this user
+    this.stopMonitoring(userId);
 
     try {
-      const audioContext = new (window.AudioContext ||
-        window.webkitAudioContext)();
+      const audioContext = new AudioContext();
       const analyser = audioContext.createAnalyser();
-      const source = audioContext.createMediaStreamSource(stream);
-
       analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.8;
+      analyser.smoothingTimeConstant = 0.3;
+
+      const source = audioContext.createMediaStreamSource(stream);
       source.connect(analyser);
 
       this.audioContexts.set(userId, audioContext);
       this.analysers.set(userId, analyser);
       this.volumeCallbacks.set(userId, onVolumeChange);
 
-      this.detectVolume(userId);
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-      console.log("Started audio monitoring for", userId);
+      const checkVolume = () => {
+        if (!this.analysers.has(userId)) return;
+
+        analyser.getByteFrequencyData(dataArray);
+
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / dataArray.length;
+        const normalizedVolume = Math.min(average / 128, 1);
+
+        const callback = this.volumeCallbacks.get(userId);
+        if (callback) {
+          callback(normalizedVolume);
+        }
+
+        const frameId = requestAnimationFrame(checkVolume);
+        this.animationFrames.set(userId, frameId);
+      };
+
+      checkVolume();
     } catch (error) {
       console.error("Error starting audio monitoring:", error);
     }
   }
 
-  detectVolume(userId) {
-    const analyser = this.analysers.get(userId);
-    const callback = this.volumeCallbacks.get(userId);
-
-    if (!analyser || !callback) return;
-
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-    const checkVolume = () => {
-      analyser.getByteFrequencyData(dataArray);
-
-      // Calculate average volume
-      const sum = dataArray.reduce((acc, val) => acc + val, 0);
-      const average = sum / dataArray.length;
-
-      // Normalize to 0-100
-      const volume = Math.min(100, Math.round((average / 255) * 100));
-
-      callback(volume);
-
-      const frameId = requestAnimationFrame(checkVolume);
-      this.animationFrames.set(userId, frameId);
-    };
-
-    checkVolume();
-  }
-
-  stopMonitoring(userId) {
+  // MEM-002: Properly close AudioContext — await the async close() and guard against double-close
+  async stopMonitoring(userId) {
     const frameId = this.animationFrames.get(userId);
     if (frameId) {
       cancelAnimationFrame(frameId);
@@ -69,21 +61,23 @@ class AudioMonitor {
     }
 
     const audioContext = this.audioContexts.get(userId);
-    if (audioContext) {
-      audioContext.close();
+    if (audioContext && audioContext.state !== "closed") {
+      try {
+        await audioContext.close(); // MEM-002: Await the async close
+      } catch (e) {
+        // Already closed or in invalid state — safe to ignore
+      }
       this.audioContexts.delete(userId);
     }
 
     this.analysers.delete(userId);
     this.volumeCallbacks.delete(userId);
-
-    console.log("Stopped audio monitoring for", userId);
   }
 
-  stopAll() {
-    this.audioContexts.forEach((_, userId) => {
-      this.stopMonitoring(userId);
-    });
+  // MEM-002: Stop all monitors concurrently and await completion
+  async stopAll() {
+    const userIds = Array.from(this.audioContexts.keys());
+    await Promise.all(userIds.map((userId) => this.stopMonitoring(userId)));
   }
 }
 

@@ -1,4 +1,6 @@
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+// SEC-001: Use relative path so requests go through the Vite proxy (same-origin),
+// ensuring httpOnly cookies are sent correctly without cross-origin issues
+const API_URL = import.meta.env.VITE_API_URL || "/api";
 
 class ApiService {
   constructor() {
@@ -7,13 +9,12 @@ class ApiService {
 
   async request(endpoint, options = {}) {
     const url = `${this.baseURL}${endpoint}`;
-    const token = localStorage.getItem("token");
 
     const config = {
       ...options,
+      credentials: "include", // SEC-001: Send httpOnly cookies with every request
       headers: {
         "Content-Type": "application/json",
-        ...(token && { Authorization: `Bearer ${token}` }),
         ...options.headers,
       },
     };
@@ -51,10 +52,17 @@ class ApiService {
     return this.request("/auth/me");
   }
 
-  async refreshToken(refreshToken) {
+  // SEC-001: Refresh now relies on httpOnly cookie — no body payload needed
+  async refreshToken() {
     return this.request("/auth/refresh", {
       method: "POST",
-      body: JSON.stringify({ refreshToken }),
+    });
+  }
+
+  // SEC-001: Server-side logout clears httpOnly cookies
+  async logout() {
+    return this.request("/auth/logout", {
+      method: "POST",
     });
   }
 

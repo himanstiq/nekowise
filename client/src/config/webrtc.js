@@ -6,8 +6,24 @@ export const STUN_SERVERS = [
   { urls: "stun:stun4.l.google.com:19302" },
 ];
 
+// RTC-002: Build ICE server list with TURN support for production
+// Without TURN, ~10-15% of users behind symmetric NATs cannot connect
+const buildIceServers = () => {
+  const servers = [...STUN_SERVERS];
+
+  if (import.meta.env.VITE_TURN_URL) {
+    servers.push({
+      urls: import.meta.env.VITE_TURN_URL,
+      username: import.meta.env.VITE_TURN_USERNAME || "",
+      credential: import.meta.env.VITE_TURN_CREDENTIAL || "",
+    });
+  }
+
+  return servers;
+};
+
 export const RTC_CONFIG = {
-  iceServers: STUN_SERVERS,
+  iceServers: buildIceServers(), // RTC-002: Includes TURN when configured
   iceCandidatePoolSize: 10,
   bundlePolicy: "max-bundle",
   rtcpMuxPolicy: "require",

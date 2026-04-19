@@ -1,83 +1,73 @@
-import { createContext, useState, useEffect, useContext } from "react";
+import { createContext, useContext, useState, useEffect } from "react";
 import api from "../services/api";
 
 const AuthContext = createContext(null);
 
-export const AuthProvider = ({ children }) => {
+export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
 
+  // SEC-001: Check auth via httpOnly cookie — no localStorage token check needed
   useEffect(() => {
     checkAuth();
   }, []);
 
   const checkAuth = async () => {
-    const token = localStorage.getItem("token");
-    if (token) {
-      try {
-        const response = await api.getMe();
-        setUser(response.user);
-      } catch (error) {
-        console.error("Auth check failed:", error);
-        localStorage.removeItem("token");
-        localStorage.removeItem("refreshToken");
-      }
-    }
-    setLoading(false);
-  };
-
-  const register = async (userData) => {
     try {
-      setError(null);
-      const response = await api.register(userData);
-      localStorage.setItem("token", response.token);
-      localStorage.setItem("refreshToken", response.refreshToken);
+      // SEC-001: Cookie is sent automatically via credentials:'include' in api.js
+      const response = await api.getMe();
       setUser(response.user);
-      return response;
     } catch (error) {
-      setError(error.message);
-      throw error;
+      // No valid session — user is not authenticated
+      setUser(null);
+    } finally {
+      setLoading(false);
     }
   };
 
   const login = async (credentials) => {
-    try {
-      setError(null);
-      const response = await api.login(credentials);
-      localStorage.setItem("token", response.token);
-      localStorage.setItem("refreshToken", response.refreshToken);
-      setUser(response.user);
-      return response;
-    } catch (error) {
-      setError(error.message);
-      throw error;
-    }
+    // SEC-001: Server sets httpOnly cookies — no tokens in response body
+    const response = await api.login(credentials);
+    setUser(response.user);
+    return response;
   };
 
-  const logout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("refreshToken");
+  const register = async (userData) => {
+    // SEC-001: Server sets httpOnly cookies — no tokens in response body
+    const response = await api.register(userData);
+    setUser(response.user);
+    return response;
+  };
+
+  // SEC-001: Server-side logout clears httpOnly cookies
+  const logout = async () => {
+    try {
+      await api.logout();
+    } catch (error) {
+      // Best-effort — clear client state even if server call fails
+      console.error("Logout API call failed:", error);
+    }
     setUser(null);
   };
 
   const value = {
     user,
     loading,
-    error,
-    register,
     login,
+    register,
     logout,
     isAuthenticated: !!user,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-};
+}
 
-export const useAuth = () => {
+export function useAuth() {
   const context = useContext(AuthContext);
   if (!context) {
-    throw new Error("useAuth must be used within AuthProvider");
+    throw new Error("useAuth must be used within an AuthProvider");
   }
   return context;
-};
+}
+
+export default AuthContext;

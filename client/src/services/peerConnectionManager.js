@@ -5,12 +5,15 @@ class PeerConnectionManager {
   constructor() {
     this.peers = new Map();
     this.signaling = null;
+    this.localUserId = null; // RTC-001: Used for glare condition resolution
     this.onRemoteStreamCallback = null;
     this.onPeerConnectionStateCallback = null;
   }
 
-  initialize(signaling, onRemoteStream, onPeerConnectionState) {
+  // RTC-001: Accept localUserId for polite/impolite peer determination
+  initialize(signaling, localUserId, onRemoteStream, onPeerConnectionState) {
     this.signaling = signaling;
+    this.localUserId = localUserId; // RTC-001: Store local user ID
     this.onRemoteStreamCallback = onRemoteStream;
     this.onPeerConnectionStateCallback = onPeerConnectionState;
 
@@ -86,6 +89,7 @@ class PeerConnectionManager {
     }
   }
 
+  // RTC-001: Handle incoming offers with perfect negotiation pattern (glare resolution)
   async handleOffer(message) {
     try {
       const { fromUserId, fromUsername, offer } = message;
@@ -93,12 +97,25 @@ class PeerConnectionManager {
 
       const pc = await this.createPeerConnection(fromUserId, fromUsername);
 
-      // Check if we're in the correct state to receive an offer
+      // RTC-001: Check signaling state — handle glare (simultaneous offers)
       const signalingState = pc.pc.signalingState;
       if (signalingState !== "stable") {
-        console.warn(
-          `Received offer from ${fromUserId} in signaling state: ${signalingState}. Attempting to handle anyway...`
+        // RTC-001: Polite/impolite peer pattern — lower ID is "polite" and yields
+        const isPolite = this.localUserId < fromUserId;
+
+        if (!isPolite) {
+          // Impolite peer: ignore incoming offer, keep our own
+          console.log(
+            `RTC-001: Ignoring offer from ${fromUserId} — we are impolite peer (state: ${signalingState})`
+          );
+          return;
+        }
+
+        // Polite peer: rollback our offer and accept theirs
+        console.log(
+          `RTC-001: Rolling back local offer for ${fromUserId} — we are polite peer`
         );
+        await pc.pc.setLocalDescription({ type: "rollback" });
       }
 
       await pc.setRemoteDescription(offer);

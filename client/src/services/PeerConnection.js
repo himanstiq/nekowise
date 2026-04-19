@@ -108,6 +108,7 @@ class PeerConnection {
     };
   }
 
+  // RTC-003: ICE restart with exponential backoff to prevent flooding the signaling channel
   async handleConnectionFailed() {
     if (this.isRestarting) {
       console.log("Already restarting connection with", this.userId);
@@ -136,9 +137,27 @@ class PeerConnection {
     this.isRestarting = true;
     this.restartAttempts++;
 
-    console.log(
-      `Attempting ICE restart for ${this.userId} (attempt ${this.restartAttempts}/${this.maxRestartAttempts})`
+    // RTC-003: Exponential backoff — 1s, 2s, 4s instead of immediate rapid-fire restarts
+    const delay = Math.min(
+      1000 * Math.pow(2, this.restartAttempts - 1),
+      8000
     );
+    console.log(
+      `ICE restart for ${this.userId} in ${delay}ms (attempt ${this.restartAttempts}/${this.maxRestartAttempts})`
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, delay));
+
+    // RTC-003: Check if connection recovered during the backoff wait
+    if (
+      this.pc.connectionState === "connected" ||
+      this.pc.iceConnectionState === "connected" ||
+      this.pc.iceConnectionState === "completed"
+    ) {
+      console.log("Connection recovered during backoff, skipping restart");
+      this.isRestarting = false;
+      return;
+    }
 
     try {
       // Perform ICE restart by creating a new offer with iceRestart
@@ -288,6 +307,7 @@ class PeerConnection {
     }
   }
 
+  // MEM-003: Properly close peer connection — stop remote tracks and remove event handlers
   close() {
     console.log("Closing peer connection with", this.userId);
 
@@ -297,7 +317,26 @@ class PeerConnection {
       this.connectionFailedTimeout = null;
     }
 
+    // MEM-003: Remove all event handlers to prevent callbacks on closed connection
+    this.pc.onicecandidate = null;
+    this.pc.ontrack = null;
+    this.pc.onconnectionstatechange = null;
+    this.pc.oniceconnectionstatechange = null;
+    this.pc.onicegatheringstatechange = null;
+    this.pc.onnegotiationneeded = null;
+
+    // MEM-003: Stop all received tracks to release the media pipeline
+    this.pc.getReceivers().forEach((receiver) => {
+      if (receiver.track) {
+        receiver.track.stop();
+      }
+    });
+
     this.pc.close();
+
+    // MEM-003: Null out callbacks to prevent stale references
+    this.onTrackCallback = null;
+    this.onConnectionStateChangeCallback = null;
   }
 
   getConnectionState() {
