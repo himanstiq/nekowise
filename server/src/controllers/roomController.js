@@ -1,3 +1,4 @@
+import crypto from "crypto"; // AUDIT: Required for timing-safe comparison
 import Room from "../models/Room.js";
 import logger from "../utils/logger.js";
 
@@ -9,11 +10,14 @@ export const createRoom = async (req, res) => {
       return res.status(400).json({ message: "Room name is required" });
     }
 
+    // AUDIT: Validate and coerce maxParticipants before passing to model
+    const safeMaxParticipants = Math.min(10, Math.max(2, parseInt(maxParticipants) || 6));
+
     const room = await Room.create({
       name,
       description,
       isPublic: isPublic || false,
-      maxParticipants: maxParticipants || 6,
+      maxParticipants: safeMaxParticipants,
       createdBy: req.user.id,
     });
 
@@ -42,15 +46,17 @@ export const createRoom = async (req, res) => {
     });
   } catch (error) {
     logger.error("Create room error", { error: error.message });
-    res
-      .status(500)
-      .json({ message: "Error creating room", error: error.message });
+    // AUDIT: Never expose internal error details in production responses
+    res.status(500).json({ message: "Error creating room" });
   }
 };
 
 export const getRooms = async (req, res) => {
   try {
-    const { page = 1, limit = 10, isPublic } = req.query;
+    // AUDIT: Clamp pagination params to prevent resource exhaustion
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit) || 10), 100);
+    const { isPublic } = req.query;
 
     const query = { isActive: true };
     if (isPublic !== undefined) {
@@ -60,7 +66,7 @@ export const getRooms = async (req, res) => {
     const rooms = await Room.find(query)
       .populate("createdBy", "username displayName avatar")
       .sort({ createdAt: -1 })
-      .limit(limit * 1)
+      .limit(limit)
       .skip((page - 1) * limit);
 
     const count = await Room.countDocuments(query);
@@ -80,16 +86,15 @@ export const getRooms = async (req, res) => {
         // accessToken intentionally excluded for security
       })),
       pagination: {
-        currentPage: parseInt(page),
+        currentPage: page,
         totalPages: Math.ceil(count / limit),
         totalRooms: count,
       },
     });
   } catch (error) {
     logger.error("Get rooms error", { error: error.message });
-    res
-      .status(500)
-      .json({ message: "Error fetching rooms", error: error.message });
+    // AUDIT: Never expose internal error details
+    res.status(500).json({ message: "Error fetching rooms" });
   }
 };
 
@@ -126,9 +131,8 @@ export const getRoomById = async (req, res) => {
     });
   } catch (error) {
     logger.error("Get room by ID error", { error: error.message });
-    res
-      .status(500)
-      .json({ message: "Error fetching room", error: error.message });
+    // AUDIT: Never expose internal error details
+    res.status(500).json({ message: "Error fetching room" });
   }
 };
 
@@ -137,14 +141,25 @@ export const validateRoomAccess = async (req, res) => {
     const { roomId } = req.params;
     const { accessToken } = req.body;
 
+    // AUDIT: Validate accessToken type to prevent NoSQL injection
+    if (accessToken && typeof accessToken !== "string") {
+      return res.status(400).json({ message: "Invalid access token format" });
+    }
+
     const room = await Room.findOne({ roomId, isActive: true });
 
     if (!room) {
       return res.status(404).json({ message: "Room not found" });
     }
 
-    if (!room.isPublic && room.accessToken !== accessToken) {
-      return res.status(403).json({ message: "Invalid access token" });
+    // AUDIT: Use timing-safe comparison to prevent timing-based oracle attacks on room tokens
+    if (!room.isPublic) {
+      const expected = Buffer.from(room.accessToken);
+      const received = Buffer.from(String(accessToken || ""));
+      if (expected.length !== received.length ||
+          !crypto.timingSafeEqual(expected, received)) {
+        return res.status(403).json({ message: "Invalid access token" });
+      }
     }
 
     if (room.currentParticipants >= room.maxParticipants) {
@@ -164,15 +179,16 @@ export const validateRoomAccess = async (req, res) => {
     });
   } catch (error) {
     logger.error("Validate room access error", { error: error.message });
-    res
-      .status(500)
-      .json({ message: "Error validating access", error: error.message });
+    // AUDIT: Never expose internal error details
+    res.status(500).json({ message: "Error validating access" });
   }
 };
 
 export const getCompletedRooms = async (req, res) => {
   try {
-    const { page = 1, limit = 10 } = req.query;
+    // AUDIT: Clamp pagination params to prevent resource exhaustion
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit) || 10), 100);
 
     // Get only completed rooms (closed and inactive) created by the user
     const query = {
@@ -184,7 +200,7 @@ export const getCompletedRooms = async (req, res) => {
     const rooms = await Room.find(query)
       .populate("createdBy", "username displayName avatar")
       .sort({ closedAt: -1 })
-      .limit(limit * 1)
+      .limit(limit)
       .skip((page - 1) * limit);
 
     const count = await Room.countDocuments(query);
@@ -204,17 +220,15 @@ export const getCompletedRooms = async (req, res) => {
         closedAt: room.closedAt,
       })),
       pagination: {
-        currentPage: parseInt(page),
+        currentPage: page,
         totalPages: Math.ceil(count / limit),
         totalRooms: count,
       },
     });
   } catch (error) {
     logger.error("Get completed rooms error", { error: error.message });
-    res.status(500).json({
-      message: "Error fetching completed rooms",
-      error: error.message,
-    });
+    // AUDIT: Never expose internal error details
+    res.status(500).json({ message: "Error fetching completed rooms" });
   }
 };
 
@@ -253,8 +267,7 @@ export const deleteRoom = async (req, res) => {
     });
   } catch (error) {
     logger.error("Delete room error", { error: error.message });
-    res
-      .status(500)
-      .json({ message: "Error deleting room", error: error.message });
+    // AUDIT: Never expose internal error details
+    res.status(500).json({ message: "Error deleting room" });
   }
 };

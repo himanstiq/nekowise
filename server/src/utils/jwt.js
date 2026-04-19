@@ -15,7 +15,12 @@ export const generateToken = (userId, expiresIn = process.env.JWT_EXPIRE) => {
 
 export const verifyToken = (token) => {
   try {
-    return jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    // AUDIT: Enforce type check to prevent token-type confusion
+    if (decoded.type !== "access") {
+      throw new Error("Invalid token type");
+    }
+    return decoded;
   } catch (error) {
     logger.error("Error verifying token", { error: error.message });
     throw error;

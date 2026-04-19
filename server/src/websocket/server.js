@@ -62,9 +62,9 @@ class SignalingServer {
       logger.info("New WebSocket connection attempt");
 
       const url = new URL(req.url, `http://${req.headers.host}`);
-      // SEC-001: Accept 'ticket' parameter (short-lived token from /auth/ws-ticket)
-      const token =
-        url.searchParams.get("ticket") || url.searchParams.get("token");
+      // AUDIT: Only accept 'ticket' parameter to enforce short-lived ticket model.
+      // Accepting 'token' would allow long-lived access tokens to bypass the 30s ticket expiry.
+      const token = url.searchParams.get("ticket");
 
       if (!token) {
         logger.warn("WebSocket connection rejected: No token provided");
@@ -409,6 +409,16 @@ class SignalingServer {
 
   async registerRoomJoin(roomDoc, client) {
     this.assignClientToRoom(client, roomDoc.roomId);
+
+    // AUDIT: Cap participant history to prevent unbounded document growth.
+    // Keep all active (no leftAt) entries and the most recent 200 historical entries.
+    if (roomDoc.participants.length > 500) {
+      const active = roomDoc.participants.filter((p) => !p.leftAt);
+      const historical = roomDoc.participants
+        .filter((p) => p.leftAt)
+        .slice(-200);
+      roomDoc.participants = [...historical, ...active];
+    }
 
     roomDoc.participants.push({
       userId: client.userId,

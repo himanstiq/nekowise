@@ -1,8 +1,10 @@
 import { Navigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 
-export default function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading } = useAuth();
+// AUDIT: Added requireAdmin prop to enforce admin role at the route level,
+// preventing non-admin users from mounting admin components.
+export default function ProtectedRoute({ children, requireAdmin = false }) {
+  const { user, isAuthenticated, loading } = useAuth();
 
   if (loading) {
     return (
@@ -14,6 +16,11 @@ export default function ProtectedRoute({ children }) {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
+  }
+
+  // AUDIT: Block non-admin users from accessing admin routes
+  if (requireAdmin && user?.role !== "admin") {
+    return <Navigate to="/dashboard" replace />;
   }
 
   return children;

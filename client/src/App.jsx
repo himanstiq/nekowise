@@ -41,7 +41,8 @@ function AppLayout() {
           <Route
             path="/admin"
             element={
-              <ProtectedRoute>
+              // AUDIT: Enforce admin role at route level to prevent non-admin UI rendering
+              <ProtectedRoute requireAdmin>
                 <Admin />
               </ProtectedRoute>
             }

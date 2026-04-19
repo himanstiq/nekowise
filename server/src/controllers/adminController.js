@@ -72,7 +72,8 @@ export const getActiveRooms = async (req, res) => {
 // Get recent sessions
 export const getRecentSessions = async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 20;
+    // AUDIT: Clamp limit to prevent resource exhaustion
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit) || 20), 100);
 
     const sessions = await Session.find()
       .sort({ startedAt: -1 })
@@ -89,8 +90,9 @@ export const getRecentSessions = async (req, res) => {
 // Get all users
 export const getAllUsers = async (req, res) => {
   try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    // AUDIT: Clamp pagination params to prevent resource exhaustion
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit) || 20), 100);
     const skip = (page - 1) * limit;
 
     const users = await User.find()
