@@ -12,7 +12,7 @@ import {
   CardDescription,
   CardContent,
 } from "../components/ui/card";
-import { Video, AlertCircle } from "lucide-react";
+import { AlertCircle } from "lucide-react";
 
 export default function Login() {
   const navigate = useNavigate();

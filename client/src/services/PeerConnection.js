@@ -210,6 +210,7 @@ class PeerConnection {
   }
 
   // Get connection statistics
+  // AUDIT: Track previous stats for delta-based bitrate calculation
   async getStats() {
     try {
       const stats = await this.pc.getStats();
@@ -224,9 +225,19 @@ class PeerConnection {
           if (result[kind]) {
             result[kind].packetsLost = report.packetsLost || 0;
             result[kind].jitter = report.jitter || 0;
-            result[kind].bitrate = report.bytesReceived
-              ? (report.bytesReceived * 8) / (report.timestamp / 1000)
-              : 0;
+
+            // AUDIT: Use delta-based bitrate calculation instead of dividing by epoch
+            const prevKey = `_prev_${kind}_${report.ssrc}`;
+            const prev = this[prevKey];
+            if (prev && report.timestamp > prev.timestamp) {
+              const deltaBytes = (report.bytesReceived || 0) - prev.bytesReceived;
+              const deltaMs = report.timestamp - prev.timestamp;
+              result[kind].bitrate = (deltaBytes * 8) / (deltaMs / 1000); // bps
+            }
+            this[prevKey] = {
+              bytesReceived: report.bytesReceived || 0,
+              timestamp: report.timestamp,
+            };
           }
         } else if (
           report.type === "candidate-pair" &&

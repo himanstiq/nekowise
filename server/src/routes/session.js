@@ -1,5 +1,6 @@
 import express from "express";
 import { protect } from "../middleware/auth.js";
+import { requireAdmin } from "../middleware/adminAuth.js"; // AUDIT: Import admin auth
 import {
   getSessions,
   getActiveSessions,
@@ -14,16 +15,12 @@ const router = express.Router();
 // All session routes require authentication
 router.use(protect);
 
-// Get all sessions (paginated)
-router.get("/", getSessions);
+// AUDIT: Restrict system-wide session listing to admins only
+router.get("/", requireAdmin, getSessions);
+router.get("/active", requireAdmin, getActiveSessions);
+router.get("/stats", requireAdmin, getSessionStats);
 
-// Get active sessions
-router.get("/active", getActiveSessions);
-
-// Get session statistics
-router.get("/stats", getSessionStats);
-
-// Get current user's sessions
+// Get current user's sessions — safe for any authenticated user
 router.get("/me", getUserSessions);
 
 // Get sessions by room

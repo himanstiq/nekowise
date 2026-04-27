@@ -4,6 +4,7 @@ import { createServer } from "http";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
+import compression from "compression"; // AUDIT: Activate already-installed compression
 import cookieParser from "cookie-parser"; // SEC-001: Required to read httpOnly cookies
 import crypto from "crypto"; // API-001: For request IDs
 
@@ -41,6 +42,7 @@ if (!clientUrl && process.env.NODE_ENV === "production") {
 
 // Security middleware
 app.use(helmet());
+app.use(compression()); // AUDIT: Compress API responses to reduce bandwidth
 app.use(
   cors({
     origin:

@@ -6,16 +6,20 @@ export const createRoom = async (req, res) => {
   try {
     const { name, description, isPublic, maxParticipants } = req.body;
 
-    if (!name) {
-      return res.status(400).json({ message: "Room name is required" });
+    // AUDIT: Validate type to prevent NoSQL injection via non-string values
+    if (!name || typeof name !== "string") {
+      return res.status(400).json({ message: "Room name is required and must be a string" });
     }
+
+    // AUDIT: Coerce description to string if provided
+    const safeDescription = description != null ? String(description) : undefined;
 
     // AUDIT: Validate and coerce maxParticipants before passing to model
     const safeMaxParticipants = Math.min(10, Math.max(2, parseInt(maxParticipants) || 6));
 
     const room = await Room.create({
       name,
-      description,
+      description: safeDescription,
       isPublic: isPublic || false,
       maxParticipants: safeMaxParticipants,
       createdBy: req.user.id,

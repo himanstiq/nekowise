@@ -96,7 +96,18 @@ const roomSchema = new mongoose.Schema({
     type: Number,
     default: 0,
   },
-  messages: [chatMessageSchema],
+  // AUDIT: Cap messages to prevent unbounded document growth (16MB BSON limit)
+  messages: {
+    type: [chatMessageSchema],
+    validate: [
+      {
+        validator: function (val) {
+          return val.length <= 500;
+        },
+        message: "Chat history is limited to 500 messages per room",
+      },
+    ],
+  },
   sessionId: {
     type: String,
     default: null,

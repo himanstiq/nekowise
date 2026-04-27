@@ -18,6 +18,11 @@ function acquireRoomLock(roomId) {
   return prevLock.then(() => release);
 }
 
+// AUDIT: Clean up stale room lock entries to prevent memory leak
+export function releaseRoomLock(roomId) {
+  roomJoinLocks.delete(roomId);
+}
+
 // SEC-006: Improved chat message sanitization — strip control chars instead of naive regex
 function sanitizeChatMessage(text) {
   return text
@@ -99,7 +104,8 @@ async function handleJoinRoom(server, client, message, correlationId) {
 
     // If already in this room, refresh participant list
     if (client.roomId === roomId) {
-      client.username = username || user.displayName || user.username;
+      // AUDIT: Always use server-fetched username to prevent spoofing
+      client.username = user.displayName || user.username;
 
       const participants = server
         .getRoomParticipants(roomId)
@@ -114,7 +120,8 @@ async function handleJoinRoom(server, client, message, correlationId) {
       return;
     }
 
-    client.username = username || user.displayName || user.username;
+    // AUDIT: Always use server-fetched username to prevent spoofing
+    client.username = user.displayName || user.username;
 
     await server.registerRoomJoin(room, client);
 

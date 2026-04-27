@@ -58,11 +58,19 @@ export const getSystemStats = async (req, res) => {
 // Get active rooms with details
 export const getActiveRooms = async (req, res) => {
   try {
+    // AUDIT: Add pagination to prevent unbounded result sets at scale
+    const limit = Math.min(Math.max(1, parseInt(req.query.limit) || 50), 200);
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+
     const rooms = await Room.find({ isActive: true })
       .populate("createdBy", "username email")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit);
 
-    res.json({ rooms, count: rooms.length });
+    const count = await Room.countDocuments({ isActive: true });
+
+    res.json({ rooms, count, pagination: { page, limit, total: count } });
   } catch (error) {
     logger.error("Get active rooms error", { error: error.message });
     res.status(500).json({ message: "Failed to fetch active rooms" });

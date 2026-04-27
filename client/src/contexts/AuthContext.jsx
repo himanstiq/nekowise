@@ -6,6 +6,8 @@ const AuthContext = createContext(null);
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  // AUDIT: Expose error state so Login/Register pages can display auth errors
+  const [error, setError] = useState(null);
 
   // SEC-001: Check auth via httpOnly cookie — no localStorage token check needed
   useEffect(() => {
@@ -27,16 +29,28 @@ export function AuthProvider({ children }) {
 
   const login = async (credentials) => {
     // SEC-001: Server sets httpOnly cookies — no tokens in response body
-    const response = await api.login(credentials);
-    setUser(response.user);
-    return response;
+    setError(null);
+    try {
+      const response = await api.login(credentials);
+      setUser(response.user);
+      return response;
+    } catch (err) {
+      setError(err.message || "Login failed");
+      throw err;
+    }
   };
 
   const register = async (userData) => {
     // SEC-001: Server sets httpOnly cookies — no tokens in response body
-    const response = await api.register(userData);
-    setUser(response.user);
-    return response;
+    setError(null);
+    try {
+      const response = await api.register(userData);
+      setUser(response.user);
+      return response;
+    } catch (err) {
+      setError(err.message || "Registration failed");
+      throw err;
+    }
   };
 
   // SEC-001: Server-side logout clears httpOnly cookies
@@ -48,11 +62,13 @@ export function AuthProvider({ children }) {
       console.error("Logout API call failed:", error);
     }
     setUser(null);
+    setError(null);
   };
 
   const value = {
     user,
     loading,
+    error,
     login,
     register,
     logout,

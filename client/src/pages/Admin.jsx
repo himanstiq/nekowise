@@ -53,21 +53,23 @@ export default function Admin() {
   const fetchData = async () => {
     try {
       setLoading(true);
+      // AUDIT: Use api.request() — api.get/post/put/delete don't exist on ApiService
       const [statsRes, roomsRes, sessionsRes, usersRes] = await Promise.all([
-        api.get("/admin/stats"),
-        api.get("/admin/rooms/active"),
-        api.get("/admin/sessions/recent?limit=10"),
-        api.get("/admin/users?limit=50"),
+        api.request("/admin/stats"),
+        api.request("/admin/rooms/active"),
+        api.request("/admin/sessions/recent?limit=10"),
+        api.request("/admin/users?limit=50"),
       ]);
 
-      setStats(statsRes.data.stats);
-      setActiveRooms(roomsRes.data.rooms);
-      setRecentSessions(sessionsRes.data.sessions);
-      setUsers(usersRes.data.users);
+      // AUDIT: api.request() returns parsed JSON directly, not { data: ... }
+      setStats(statsRes.stats);
+      setActiveRooms(roomsRes.rooms);
+      setRecentSessions(sessionsRes.sessions);
+      setUsers(usersRes.users);
       setError(null);
     } catch (err) {
       console.error("Failed to fetch admin data:", err);
-      setError(err.response?.data?.message || "Failed to load admin data");
+      setError(err.message || "Failed to load admin data");
     } finally {
       setLoading(false);
     }
@@ -77,10 +79,11 @@ export default function Admin() {
     if (!confirm("Are you sure you want to close this room?")) return;
 
     try {
-      await api.post(`/admin/rooms/${roomId}/close`);
+      // AUDIT: Use api.request() with method option
+      await api.request(`/admin/rooms/${roomId}/close`, { method: "POST" });
       fetchData();
     } catch (err) {
-      alert(err.response?.data?.message || "Failed to close room");
+      alert(err.message || "Failed to close room");
     }
   };
 
@@ -88,10 +91,14 @@ export default function Admin() {
     if (!confirm(`Change user role to ${newRole}?`)) return;
 
     try {
-      await api.put(`/admin/users/${userId}/role`, { role: newRole });
+      // AUDIT: Use api.request() with method and body options
+      await api.request(`/admin/users/${userId}/role`, {
+        method: "PUT",
+        body: JSON.stringify({ role: newRole }),
+      });
       fetchData();
     } catch (err) {
-      alert(err.response?.data?.message || "Failed to update role");
+      alert(err.message || "Failed to update role");
     }
   };
 
@@ -104,10 +111,11 @@ export default function Admin() {
       return;
 
     try {
-      await api.delete(`/admin/users/${userId}`);
+      // AUDIT: Use api.request() with DELETE method
+      await api.request(`/admin/users/${userId}`, { method: "DELETE" });
       fetchData();
     } catch (err) {
-      alert(err.response?.data?.message || "Failed to delete user");
+      alert(err.message || "Failed to delete user");
     }
   };
 
